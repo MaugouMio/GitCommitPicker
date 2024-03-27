@@ -8,7 +8,8 @@
 #                                                                          #
 # How to use:                                                              #
 # 1. Switch to the branch you want to pick commits to                      #
-# 2. Run this script in the git directory                                  #
+# 2. Run this script in CMD with the git directory path as first argument  #
+#    Or simply drag the git folder to this script to open it               #
 # 3. Follow the instructions and paste the master commits you want to pick #
 # 4. Check the result and push if no problems found                        #
 #                                                                          #
@@ -27,7 +28,7 @@ except:
 	import git
 
 try:
-	repo = git.Repo(".")
+	repo = git.Repo(sys.argv[1])
 except git.exc.InvalidGitRepositoryError:
 	print("Current directory is not an available git repository!")
 	sys.exit(1)
@@ -83,7 +84,9 @@ while True:
 		break
 	targetCommits.add(sha)
 
-print("\nCommits specified! Checking for lost commits...")
+print("")
+print("Commits specified! Checking for lost commits...")
+print("")
 
 
 
@@ -113,6 +116,8 @@ for i in range(len(masterCommits) - 1, -1, -1):
 			affectedFiles.add(file)
 	else:
 		skippedCommits.append(commit)
+	
+	print(f"Checking master commits ({len(masterCommits) - i}/{len(masterCommits)})")
 
 if len(lostCommits) > 0:
 	print("The following commits will be picked but NOT in the list.")
@@ -136,20 +141,26 @@ if len(skippedCommits) > 0:
 
 
 
-print("\nStart processing...")
+print("")
+print("Start processing...")
+print("")
 
 # iterate through master commit list and check whether to pick or not
 canRebase = True
 rebaseCommit = None
+i = 1
 for commit in masterCommits:
 	sha = commit.hexsha
 	if sha in picked:
+		print(f"Commit already picked ({i}/{len(masterCommits)})")
 		if canRebase:
 			rebaseCommit = commit
 	elif sha in targetCommits:
 		if canRebase:
+			print(f"Commit can be rebased ({i}/{len(masterCommits)})")
 			rebaseCommit = commit
 		else:
+			print(f"Picking commit {sha} ({i}/{len(masterCommits)})")
 			if commit.message.startswith("Merge branch"):
 				repo.git.execute(f"git cherry-pick -x -m 1 {sha}")  # don't know why repo.git.cherry_pick("-x -m 1", sha) shows error...
 			else:
@@ -157,8 +168,12 @@ for commit in masterCommits:
 		targetCommits.remove(sha)  # mark for checking if there are some specific commits not picked
 	else:  # skipped commit, can not rebase after this
 		if canRebase and rebaseCommit:
+			print(f"Found skipped commit, start rebasing on {rebaseCommit.hexsha} ({i}/{len(masterCommits)})")
 			repo.git.rebase(rebaseCommit.hexsha)
+		else:
+			print(f"Commit skipped ({i}/{len(masterCommits)})")
 		canRebase = False
+	i += 1
 
 print("")
 if rebaseCommit:
@@ -181,5 +196,3 @@ else:
 	print("Check the result using your git GUI tools and push them if no problems found.\n")
 	
 os.system("pause")
-
-
