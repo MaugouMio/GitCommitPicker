@@ -31,9 +31,15 @@ try:
 	repo = git.Repo(sys.argv[1])
 except git.exc.InvalidGitRepositoryError:
 	print("Current directory is not an available git repository!")
+	os.system("pause")
 	sys.exit(1)
 	
 branch = repo.active_branch
+if branch.name == "master":
+	print("You are already in master branch! Please select another branch to continue")
+	os.system("pause")
+	sys.exit(1)
+	
 print("\n==================================")
 print("\n Current branch:", branch.name, "\n")
 print("==================================\n")
@@ -41,21 +47,31 @@ print("==================================\n")
 input("<Press enter if this is the target branch>\n")
 
 # the branching point of current branch
-baseCommit = repo.merge_base(branch.name, "master")
+baseCommit = repo.merge_base(branch.name, "master")[0]
 
 # get master new commits
-commitRange = f"{baseCommit[0]}..master"
+commitRange = f"{baseCommit}..master"
 masterCommits = []
 for commit in repo.iter_commits(rev=commitRange, first_parent=True):
 	if commit == baseCommit:
 		break
-	masterCommits.insert(0, commit)
+		
+	checkList = []
+	if commit.message.startswith("Merge branch 'master'"):  # Auto merge commit
+		masterCommits.insert(0, (commit, 1))  # Mark auto merged
+		autoMergeBase = repo.merge_base(commit.parents[0], commit.parents[1])[0]
+		for mergeCommit in repo.iter_commits(rev=f"{autoMergeBase}..{commit.parents[1]}"):  # commits not included in first parent master
+			if mergeCommit.message.startswith("Merge branch 'master'"):  # Another auto merge commit in side branch, simply ignore that, since we will never rebase on this commit
+				continue
+			masterCommits.insert(0, (mergeCommit, 0))  # Mark no rebase
+	else:
+		masterCommits.insert(0, commit)
 
 # for checking whether a master commit is picked or not
 picked = set()
 
 # mark already cherry-picked commits
-commitRange = f"{baseCommit[0]}..{branch.name}"
+commitRange = f"{baseCommit}..{branch.name}"
 for commit in repo.iter_commits(rev=commitRange):
 	if commit == baseCommit:
 		break
@@ -96,14 +112,21 @@ skippedCommits = []
 affectedFiles = set()
 for i in range(len(masterCommits) - 1, -1, -1):
 	commit = masterCommits[i]
+	if type(commit) is tuple:
+		if commit[1] == 1:  # ignore auto merge commits
+			print(f"Skipped an auto merge commit ({len(masterCommits) - i}/{len(masterCommits)})")
+			continue
+		elif commit[1] == 0:
+			commit = commit[0]
+			
 	sha = commit.hexsha
 	if sha not in targetCommits and sha not in picked:
-		needInclude = commit.message.startswith("Merge branch 'master'")  # Auto Merge commit must be picked
-		if not needInclude:  # commits that have modified any of the files in the newer commits must be picked
-			for file in commit.stats.files.keys():
-				if file in affectedFiles:
-					needInclude = True
-					break
+		# commits that have modified any of the files in the newer commits must be picked
+		needInclude = False
+		for file in commit.stats.files.keys():
+			if file in affectedFiles:
+				needInclude = True
+				break
 		
 		if needInclude:
 			lostCommits.append(commit)
@@ -150,13 +173,21 @@ canRebase = True
 rebaseCommit = None
 i = 1
 for commit in masterCommits:
+	commitCanRebase = True
+	if type(commit) is tuple:
+		if canRebase and commit[1] == 1:  # never pick an auto merge commit, only do rebase when possible
+			picked.add(commit[0].hexsha)
+		elif commit[1] == 0:
+			commitCanRebase = False
+		commit = commit[0]
+		
 	sha = commit.hexsha
 	if sha in picked:
 		print(f"Commit already picked ({i}/{len(masterCommits)})")
-		if canRebase:
+		if canRebase and commitCanRebase:
 			rebaseCommit = commit
 	elif sha in targetCommits:
-		if canRebase:
+		if canRebase and commitCanRebase:
 			print(f"Commit can be rebased ({i}/{len(masterCommits)})")
 			rebaseCommit = commit
 		else:
