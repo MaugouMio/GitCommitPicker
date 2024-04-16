@@ -33,6 +33,23 @@ except git.exc.InvalidGitRepositoryError:
 	print("Current directory is not an available git repository!")
 	os.system("pause")
 	sys.exit(1)
+
+
+
+def IsAutoMerge(commit):
+	return commit.message.startswith("Merge branch 'master'")
+	
+def PrintCommitMessage(commit):
+	print(commit.message[:commit.message.find('\n')].encode("big5").ljust(95).decode("big5"), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(commit.committed_date)),
+		f"\n        Author: {commit.author.name}".ljust(70), "sha:", commit.hexsha)
+
+def CustomPick(commit):
+	if commit.message.startswith("Merge branch"):
+		repo.git.execute(f"git cherry-pick -x -m 1 {sha}")  # don't know why repo.git.cherry_pick("-x -m 1", sha) shows error...
+	else:
+		repo.git.cherry_pick("-x", sha)
+
+
 	
 branch = repo.active_branch
 if branch.name == "master":
@@ -44,33 +61,18 @@ print("\n==================================")
 print("\n Current branch:", branch.name, "\n")
 print("==================================\n")
 
-input("<Press enter if this is the target branch>\n")
+input("<Press enter if this is the target branch>\n\n\n")
 
 # the branching point of current branch
 baseCommit = repo.merge_base(branch.name, "master")[0]
 
-# get master new commits
-commitRange = f"{baseCommit}..master"
-masterCommits = []
-for commit in repo.iter_commits(rev=commitRange, first_parent=True):
-	if commit == baseCommit:
-		break
-		
-	checkList = []
-	if commit.message.startswith("Merge branch 'master'"):  # Auto merge commit
-		masterCommits.insert(0, (commit, 1))  # Mark auto merged
-		autoMergeBase = repo.merge_base(commit.parents[0], commit.parents[1])[0]
-		for mergeCommit in repo.iter_commits(rev=f"{autoMergeBase}..{commit.parents[1]}"):  # commits not included in first parent master
-			if mergeCommit.message.startswith("Merge branch 'master'"):  # Another auto merge commit in side branch, simply ignore that, since we will never rebase on this commit
-				continue
-			masterCommits.insert(0, (mergeCommit, 0))  # Mark no rebase
-	else:
-		masterCommits.insert(0, commit)
+
 
 # for checking whether a master commit is picked or not
 picked = set()
 
 # mark already cherry-picked commits
+print("Loading already picked commits from the merge point...")
 commitRange = f"{baseCommit}..{branch.name}"
 for commit in repo.iter_commits(rev=commitRange):
 	if commit == baseCommit:
@@ -83,8 +85,48 @@ for commit in repo.iter_commits(rev=commitRange):
 
 
 
-# get user specify commits
+# get master new commits
+print("Loading master commits from the merge point...")
+
 targetCommits = set()
+
+pickedAutoMergeChildren = []
+commitRange = f"{baseCommit}..master"
+masterCommits = []
+for commit in repo.iter_commits(rev=commitRange, first_parent=True):
+	if commit == baseCommit:
+		break
+		
+	checkList = []
+	if IsAutoMerge(commit):
+		# Modify auto merge commits picked by old version commitPicker (all children were deem as picked)
+		pickAllChildren = False
+		if commit.hexsha in picked:
+			picked.remove(commit.hexsha)
+			pickAllChildren = True
+			
+		masterCommits.insert(0, (commit, 1))  # Mark auto merged
+		autoMergeBase = repo.merge_base(commit.parents[0], commit.parents[1])[0]
+		for mergeCommit in repo.iter_commits(rev=f"{autoMergeBase}..{commit.parents[1]}"):  # commits not included in first parent master
+			if IsAutoMerge(mergeCommit):  # Another auto merge commit in side branch, simply ignore that, since we will never rebase on this commit
+				continue
+			masterCommits.insert(0, (mergeCommit, 0))  # Mark no rebase
+			if pickAllChildren:
+				pickedAutoMergeChildren.append(mergeCommit)
+				targetCommits.add(mergeCommit.hexsha)
+	else:
+		masterCommits.insert(0, commit)
+		
+if len(pickedAutoMergeChildren) > 0:
+	print("\nThe following commits will be picked since they were picked by Auto-Merge commits.")
+	print("If some of these should not appear in this version, you have to turn it off by game logic.")
+	print("=======================================================")
+	for commit in pickedAutoMergeChildren:
+		PrintCommitMessage(commit)
+	input("\n<Press Enter to continue>\n")
+
+
+# get user specify commits
 print("")
 print("")
 print("Note:")
@@ -143,12 +185,11 @@ for i in range(len(masterCommits) - 1, -1, -1):
 	print(f"Checking master commits ({len(masterCommits) - i}/{len(masterCommits)})")
 
 if len(lostCommits) > 0:
-	print("The following commits will be picked but NOT in the list.")
+	print("\nThe following commits will be picked but NOT in the list.")
 	print("If some of these should not appear in this version, you have to turn it off by game logic.")
 	print("=======================================================")
 	for commit in lostCommits:
-		print(commit.message[:commit.message.find('\n')].encode("big5").ljust(95).decode("big5"), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(commit.committed_date)),
-			f"\n        Author: {commit.author.name}".ljust(70), "sha:", commit.hexsha)
+		PrintCommitMessage(commit)
 	input("\n<Press Enter to continue>\n")
 else:
 	print("No lost commits found!")
@@ -158,8 +199,7 @@ if len(skippedCommits) > 0:
 	print("Please make sure you really don't want them picked now, or you just forgot it.")
 	print("=======================================================")
 	for commit in skippedCommits:
-		print(commit.message[:commit.message.find('\n')].encode("big5").ljust(95).decode("big5"), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(commit.committed_date)),
-			f"\n        Author: {commit.author.name}".ljust(70), "sha:", commit.hexsha)
+		PrintCommitMessage(commit)
 	input("\n<Press Enter to continue>\n")
 
 
@@ -171,36 +211,51 @@ print("")
 # iterate through master commit list and check whether to pick or not
 canRebase = True
 rebaseCommit = None
+pickAfterRebaseQueue = []  # commits that will be reset hard when doing rebase, should be picked again after rebase
 i = 1
 for commit in masterCommits:
 	commitCanRebase = True
 	if type(commit) is tuple:
-		if canRebase and commit[1] == 1:  # never pick an auto merge commit, only do rebase when possible
-			picked.add(commit[0].hexsha)
+		if commit[1] == 1:  # never pick an auto merge commit, only do rebase when possible
+			if canRebase:
+				picked.add(commit[0].hexsha)
 		elif commit[1] == 0:
 			commitCanRebase = False
 		commit = commit[0]
 		
 	sha = commit.hexsha
 	if sha in picked:
-		print(f"Commit already picked ({i}/{len(masterCommits)})")
-		if canRebase and commitCanRebase:
-			rebaseCommit = commit
+		if not canRebase and rebaseCommit != None:  # it means that all picked commits has been reset
+			print(f"Re-picking commit after rebase {sha} ({i}/{len(masterCommits)})")
+			CustomPick(commit)
+		else:
+			print(f"Commit already picked ({i}/{len(masterCommits)})")
+			if canRebase:
+				if commitCanRebase:
+					rebaseCommit = commit
+					pickAfterRebaseQueue.clear()
+				else:
+					pickAfterRebaseQueue.append(commit)
 	elif sha in targetCommits:
-		if canRebase and commitCanRebase:
-			print(f"Commit can be rebased ({i}/{len(masterCommits)})")
-			rebaseCommit = commit
+		if canRebase:
+			if commitCanRebase:
+				print(f"Commit can be rebased ({i}/{len(masterCommits)})")
+				rebaseCommit = commit
+				pickAfterRebaseQueue.clear()
+			else:
+				print(f"Pickable commit but no need to pick now {sha} ({i}/{len(masterCommits)})")
+				pickAfterRebaseQueue.append(commit)
 		else:
 			print(f"Picking commit {sha} ({i}/{len(masterCommits)})")
-			if commit.message.startswith("Merge branch"):
-				repo.git.execute(f"git cherry-pick -x -m 1 {sha}")  # don't know why repo.git.cherry_pick("-x -m 1", sha) shows error...
-			else:
-				repo.git.cherry_pick("-x", sha)
+			CustomPick(commit)
 		targetCommits.remove(sha)  # mark for checking if there are some specific commits not picked
 	else:  # skipped commit, can not rebase after this
 		if canRebase and rebaseCommit:
 			print(f"Found skipped commit, start rebasing on {rebaseCommit.hexsha} ({i}/{len(masterCommits)})")
+			repo.git.reset("--hard", baseCommit.hexsha)  # reset to baseCommit for rebase safety
 			repo.git.rebase(rebaseCommit.hexsha)
+			for rePickCommit in pickAfterRebaseQueue:
+				CustomPick(rePickCommit)
 		else:
 			print(f"Commit skipped ({i}/{len(masterCommits)})")
 		canRebase = False
@@ -218,7 +273,7 @@ if rebaseCommit:
 if len(targetCommits) > 0:
 	print("Warning:")
 	print("The following commits specified are not picked.")
-	print("It's most likely that they were already picked before, or were part of another Merge commits.")
+	print("It's most likely that they were already picked before.")
 	print("=======================================================")
 	for sha in targetCommits:
 		print(sha)
